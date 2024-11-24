@@ -1,0 +1,117 @@
+// Definições dos pinos
+const int SENSOR_POCO = 2;             // Sensor do poço
+const int SENSOR_RESERVATORIO = 3;     // Sensor do reservatório
+const int RELE_BOMBA = 4;              // Relé que controla a bomba
+const int LED_ERRO = 5;                // LED para indicar erro (poço sem água)
+
+// Variáveis de controle
+bool bombaLigada = false;              // Estado da bomba
+bool ledErroLigado = false;            // Estado do LED de erro
+unsigned long tempoReservatorioVazio = 0; // Momento em que o reservatório foi detectado vazio
+unsigned long tempoDesligamento = 0;   // Momento do desligamento da bomba
+const unsigned long delayAvaliacaoPoco = 40000; // 60000= 1 minuto em milissegundos
+const unsigned long tempoEsperaRele = 120000;   // 120000 = 2 minutos em milissegundos (tempo de espera para religar)
+bool emEspera = false;                 // Indica se está no modo de espera
+int contadorSemAgua = 0;               // Contador para detectar 3 avaliações consecutivas
+
+void setup() {
+  // Configura os pinos
+  pinMode(SENSOR_POCO, INPUT_PULLUP);
+  pinMode(SENSOR_RESERVATORIO, INPUT_PULLUP);
+  pinMode(RELE_BOMBA, OUTPUT);
+  pinMode(LED_ERRO, OUTPUT);
+
+  // Inicializa os estados
+  digitalWrite(RELE_BOMBA, LOW); // Bomba desligada
+  digitalWrite(LED_ERRO, LOW);  // LED de erro apagado
+
+  // Inicializa a serial
+  Serial.begin(9600);
+
+  // Mensagem inicial
+  Serial.println("Inicializando sistema...");
+  Serial.println("Aguardando estabilização dos sensores (3 segundos).");
+  delay(3000); // Aguarda 30 segundos
+
+  // Exibe status inicial dos sensores e atuadores
+  bool pocoComAgua = digitalRead(SENSOR_POCO) == LOW;         // LOW = poço com água
+  bool reservatorioVazio = digitalRead(SENSOR_RESERVATORIO) == LOW; // LOW = reservatório vazio
+  Serial.println("Estabilização concluída. Iniciando operação.");
+  Serial.println("Status inicial dos sensores e atuadores:");
+  Serial.print("Poço com água: ");
+  Serial.println(pocoComAgua ? "Sim" : "Não");
+  Serial.print("Reservatório vazio: ");
+  Serial.println(reservatorioVazio ? "Sim" : "Não");
+  Serial.print("Bomba: ");
+  Serial.println(bombaLigada ? "Ligada" : "Desligada");
+  Serial.print("LED de erro: ");
+  Serial.println(ledErroLigado ? "Ligado" : "Desligado");
+}
+
+void loop() {
+  // Leitura dos sensores
+  bool pocoComAgua = digitalRead(SENSOR_POCO) == LOW;         // LOW = poço com água
+  bool reservatorioVazio = digitalRead(SENSOR_RESERVATORIO) == LOW; // LOW = reservatório vazio
+
+  // Aguarda o tempo de espera antes de religar a bomba
+  if (emEspera) {
+    if (millis() - tempoDesligamento >= tempoEsperaRele) {
+      emEspera = false;
+      contadorSemAgua = 0;  // Reseta o contador ao sair do modo de espera
+      Serial.println("Tempo de espera concluído. Sistema pronto para religar a bomba.");
+    } else {
+      delay(1000); // Reduz a frequência do loop
+      return;
+    }
+  }
+
+  // Lógica para ligar a bomba
+  if (reservatorioVazio) {
+    if (!bombaLigada) {
+      digitalWrite(RELE_BOMBA, HIGH); // Liga a bomba
+      bombaLigada = true;
+      ledErroLigado = false;         // Garante que o LED de erro esteja apagado
+      digitalWrite(LED_ERRO, LOW);
+      tempoReservatorioVazio = millis(); // Registra o tempo atual
+      Serial.println("Ligando a bomba: Reservatório vazio detectado.");
+    } else {
+      Serial.println("Bomba ligada: abastecendo reservatório.");
+      delay(5000); // Reduz a frequência do log enquanto a bomba estiver ligada
+    }
+  }
+
+  // Avalia o estado do poço após o delay
+  if (bombaLigada && (millis() - tempoReservatorioVazio >= delayAvaliacaoPoco)) {
+    if (!pocoComAgua) { // Poço sem água
+      contadorSemAgua++; // Incrementa o contador
+      Serial.print("Poço sem água. Contagem de falhas consecutivas: ");
+      Serial.println(contadorSemAgua);
+
+      if (contadorSemAgua >= 3) { // Desliga após 3 avaliações consecutivas sem água
+        digitalWrite(RELE_BOMBA, LOW); // Desliga a bomba
+        bombaLigada = false;
+        ledErroLigado = true;          // Ativa o LED de erro
+        digitalWrite(LED_ERRO, HIGH);
+        tempoDesligamento = millis();  // Registra o tempo de desligamento
+        emEspera = true;               // Entra no modo de espera
+        contadorSemAgua = 0;           // Reseta o contador imediatamente após o desligamento
+        Serial.println("Desligando a bomba: 3 avaliações consecutivas sem água no poço.");
+      }
+    } else { // Poço com água, reseta o contador
+      contadorSemAgua = 0;
+      Serial.println("Avaliação concluída: Poço com água disponível.");
+    }
+    tempoReservatorioVazio = millis(); // Atualiza o tempo de avaliação
+  }
+
+  // Lógica para desligar a bomba quando o reservatório estiver cheio
+  if (!reservatorioVazio && bombaLigada) {
+    digitalWrite(RELE_BOMBA, LOW); // Desliga a bomba
+    bombaLigada = false;
+    tempoReservatorioVazio = 0;   // Reseta o temporizador
+    contadorSemAgua = 0;          // Reseta o contador
+    Serial.println("Desligando a bomba: Reservatório cheio.");
+  }
+
+  delay(1000); // Atualiza o loop a cada 1 segundo
+}
