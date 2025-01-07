@@ -1,0 +1,169 @@
+// -------------------------------
+// Definições dos pinos
+// -------------------------------
+const int SENSOR_POCO = 2;             // Pino do sensor do poço (HIGH = vazio, LOW = com água, devido ao INPUT_PULLUP)
+const int SENSOR_RESERVATORIO = 3;     // Pino do sensor do reservatório (HIGH = cheio, LOW = vazio)
+const int RELE_BOMBA = 4;             // Pino do relé que aciona a bomba (LOW = ligado, HIGH = desligado)
+const int LED_ERRO = 5;               // Pino do LED para indicar erro
+
+// -------------------------------
+// Variáveis para controle
+// -------------------------------
+bool estadoBomba = false;              // Armazena o estado lógico da bomba (true = ligada, false = desligada)
+unsigned long tempoUltimaLeitura = 0;  // Momento (millis) da última leitura dos sensores
+unsigned long tempoTesteReservatorio = 0; // Momento em que a bomba foi ligada para medir tempo de enchimento
+unsigned long tempoErro = 0;           // Momento em que ocorreu o último erro
+int contadorErros = 0;                 // Contador de erros consecutivos
+
+// -------------------------------
+// Intervalos e tempos de espera
+// -------------------------------
+const unsigned long intervaloLeitura = 2000;         // Intervalo de 2 segundos para ler e atualizar
+const unsigned long tempoEsperaReservatorio = 20000; // 20s para água chegar ao reservatório após ligar a bomba
+const unsigned long tempoAguardarErro = 600000;      // 2 min (120s) de pausa depois de um erro
+const unsigned long tempoAguardar3Erros = 1800000;    // 3 min (180s) após 3 erros consecutivos
+
+// -------------------------------
+// Intervalo de LOG
+// -------------------------------
+unsigned long tempoUltimoLog = 0;          // Momento (millis) do último log
+const unsigned long intervaloLog = 5000;   // Atualiza o log no Serial a cada 5 s (quando em pausa)
+
+void setup() {
+  // Configura os pinos
+  pinMode(SENSOR_POCO, INPUT_PULLUP);         
+  pinMode(SENSOR_RESERVATORIO, INPUT_PULLUP); 
+  pinMode(RELE_BOMBA, OUTPUT);
+  pinMode(LED_ERRO, OUTPUT);
+
+  // Estado inicial
+  digitalWrite(RELE_BOMBA, HIGH); // Desliga a bomba (relé ativo em LOW)
+  digitalWrite(LED_ERRO, LOW);
+
+  // Inicializa Serial
+  Serial.begin(9600);
+  Serial.println("Iniciando monitoramento...");
+}
+
+void loop() {
+  // Captura o tempo atual
+  unsigned long tempoAtual = millis();
+
+  // Verifica se o sistema está aguardando devido a erros consecutivos
+  if (tempoErro > 0) {
+    // Define o tempo total de pausa (se >= 3 erros, aguarda mais tempo)
+    unsigned long tempoPausa = (contadorErros >= 3 ? tempoAguardar3Erros : tempoAguardarErro);
+    unsigned long tempoDecorrido = tempoAtual - tempoErro; // Quanto tempo se passou desde que deu erro
+
+    if (tempoDecorrido < tempoPausa) {
+      // Se ainda não completou o tempo de pausa...
+      if (tempoAtual - tempoUltimoLog >= intervaloLog) {
+        tempoUltimoLog = tempoAtual; // Atualiza tempo de log
+
+        unsigned long tempoRestante = tempoPausa - tempoDecorrido;
+        unsigned long segundosRestantes = tempoRestante / 1000;
+
+        Serial.println("Sistema em pausa devido a erro. Aguardando...");
+        Serial.print("Tempo restante para religar: ");
+        Serial.print(segundosRestantes);
+        Serial.println(" segundos.");
+      }
+      return; // Não faz mais nada até completar a pausa
+    } else {
+      // A pausa acabou
+      tempoErro = 0;
+      Serial.println("Pausa concluída. Retomando o sistema.");
+    }
+  }
+
+  // Verifica se é hora de fazer uma nova leitura
+  if (tempoAtual - tempoUltimaLeitura >= intervaloLeitura) {
+    tempoUltimaLeitura = tempoAtual;
+
+    // Lê os pinos dos sensores
+    int leituraPoco = digitalRead(SENSOR_POCO);
+    int leituraReservatorio = digitalRead(SENSOR_RESERVATORIO);
+
+    // Interpreta: 
+    bool pocoVazio = (leituraPoco == HIGH);               // HIGH (com pullup) => sem água
+    bool reservatorioCheio = (leituraReservatorio == HIGH); // HIGH => cheio
+
+    // Mostra valores brutos para depuração
+    Serial.print("Leitura do Poço (RAW): ");
+    Serial.println(leituraPoco);
+    Serial.print("Leitura do Reservatório (RAW): ");
+    Serial.println(leituraReservatorio);
+
+    Serial.print("Sensor do Poço: ");
+    Serial.println(pocoVazio ? "Vazio" : "Com água");
+
+    Serial.print("Sensor do Reservatório: ");
+    Serial.println(reservatorioCheio ? "Cheio" : "Vazio");
+
+    // ---------------------------------
+    // Lógica de controle da bomba
+    // ---------------------------------
+    if (reservatorioCheio) {
+      // Se o reservatório está cheio, desliga a bomba e reseta erros
+      if (estadoBomba) {
+        digitalWrite(RELE_BOMBA, HIGH); // Bomba off
+        estadoBomba = false;
+        Serial.println("Reservatório cheio. Bomba desligada.");
+      }
+      contadorErros = 0;  // Zera erros
+      tempoErro = 0;
+      Serial.println("Sistema funcionando normalmente. Contador de erros resetado.");
+
+    } else {
+      // Se o reservatório não está cheio
+      if (!estadoBomba) {
+        // Liga a bomba se ainda não estiver ligada
+        digitalWrite(RELE_BOMBA, LOW);  // Bomba on
+        estadoBomba = true;
+        tempoTesteReservatorio = tempoAtual; // Marca início do bombeamento
+        Serial.println("Reservatório vazio. Bomba ligada.");
+      }
+
+      // Verifica se já passou o tempo de espera para encher
+      if (estadoBomba && (tempoAtual - tempoTesteReservatorio >= tempoEsperaReservatorio)) {
+        // Se chegou aqui, significa que se passaram X segundos desde que ligamos a bomba
+        // e ainda não chegou água suficiente para o sensor do reservatório marcar 'cheio'.
+
+        // Agora, verifique se o poço está vazio:
+        if (pocoVazio) {
+          // O poço está vazio => não há mais água para bombear => erro
+          digitalWrite(RELE_BOMBA, HIGH); // Desliga a bomba
+          estadoBomba = false;
+          contadorErros++;
+          tempoErro = tempoAtual; // Marca o momento do erro
+
+          Serial.print("Erro: Poço vazio (não encheu o reservatório). Bomba desligada. Total de erros: ");
+          Serial.println(contadorErros);
+
+          if (contadorErros >= 3) {
+            Serial.println("3 erros consecutivos detectados. Aguardando tempo prolongado antes de retomar...");
+          } else {
+            Serial.println("Aguardando tempo de pausa para tentar novamente.");
+          }
+
+        } else {
+          // O poço ainda TEM água => então não consideramos erro; só recomeçamos a contagem
+          // para dar mais tempo para o reservatório encher
+          tempoTesteReservatorio = tempoAtual;
+          Serial.println("Reservatório ainda não está cheio, mas o poço tem água. Continuando a bombear...");
+        }
+      }
+    }
+
+    // Mostra o estado do relé no pino físico
+    int estadoFisicoRele = digitalRead(RELE_BOMBA);
+    Serial.print("Estado Físico do Relé (PIN): ");
+    Serial.println(estadoFisicoRele == LOW ? "Ligado" : "Desligado");
+
+    // Mostra o estado lógico da bomba
+    Serial.print("Estado do Relé da Bomba (Lógica): ");
+    Serial.println(estadoBomba ? "Ligado" : "Desligado");
+
+    Serial.println("------------------------------");
+  }
+}
