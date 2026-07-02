@@ -1,0 +1,173 @@
+// -------------------------------
+// Pinos
+// -------------------------------
+const int SENSOR_POCO = 2;
+const int SENSOR_RESERVATORIO = 3;
+
+const int RELE_LIGA = 4;       // Pulso para LIGAR
+const int RELE_DESLIGA = 5;    // Pulso para DESLIGAR
+const int LED_ERRO = 6;
+
+// -------------------------------
+// Estado do sistema
+// -------------------------------
+bool estadoBomba = false;
+
+// -------------------------------
+// Controle de tempo
+// -------------------------------
+unsigned long tempoUltimaLeitura = 0;
+unsigned long tempoTesteReservatorio = 0;
+unsigned long tempoErro = 0;
+unsigned long tempoUltimoLog = 0;
+
+int contadorErros = 0;
+
+// -------------------------------
+// Tempos
+// -------------------------------
+const unsigned long intervaloLeitura = 2000;
+const unsigned long tempoEsperaReservatorio = 20000;
+const unsigned long tempoAguardarErro = 600000;
+const unsigned long tempoAguardar3Erros = 1800000;
+const unsigned long intervaloLog = 5000;
+
+// -------------------------------
+// Funções de pulso
+// -------------------------------
+void pulsoLiga() {
+  digitalWrite(RELE_LIGA, LOW);
+  delay(300);
+  digitalWrite(RELE_LIGA, HIGH);
+}
+
+void pulsoDesliga() {
+  digitalWrite(RELE_DESLIGA, LOW);
+  delay(300);
+  digitalWrite(RELE_DESLIGA, HIGH);
+}
+
+// -------------------------------
+// Setup
+// -------------------------------
+void setup() {
+  pinMode(SENSOR_POCO, INPUT_PULLUP);
+  pinMode(SENSOR_RESERVATORIO, INPUT_PULLUP);
+
+  pinMode(RELE_LIGA, OUTPUT);
+  pinMode(RELE_DESLIGA, OUTPUT);
+  pinMode(LED_ERRO, OUTPUT);
+
+  digitalWrite(RELE_LIGA, HIGH);
+  digitalWrite(RELE_DESLIGA, HIGH);
+  digitalWrite(LED_ERRO, LOW);
+
+  Serial.begin(9600);
+  Serial.println("Sistema iniciado com relés por pulso");
+}
+
+// -------------------------------
+// Loop principal
+// -------------------------------
+void loop() {
+
+  unsigned long tempoAtual = millis();
+
+  // -------------------------------
+  // BLOCO: PAUSA POR ERRO
+  // -------------------------------
+  if (tempoErro > 0) {
+
+    unsigned long tempoPausa = (contadorErros >= 3) ? tempoAguardar3Erros : tempoAguardarErro;
+    unsigned long decorrido = tempoAtual - tempoErro;
+
+    if (decorrido < tempoPausa) {
+
+      if (tempoAtual - tempoUltimoLog >= intervaloLog) {
+        tempoUltimoLog = tempoAtual;
+
+        Serial.print("Sistema em pausa. Tempo restante: ");
+        Serial.print((tempoPausa - decorrido) / 1000);
+        Serial.println("s");
+      }
+
+      return;
+    } else {
+      tempoErro = 0;
+      Serial.println("Pausa encerrada");
+    }
+  }
+
+  // -------------------------------
+  // LEITURA DOS SENSORES
+  // -------------------------------
+  if (tempoAtual - tempoUltimaLeitura >= intervaloLeitura) {
+    tempoUltimaLeitura = tempoAtual;
+
+    int leituraPoco = digitalRead(SENSOR_POCO);
+    int leituraReservatorio = digitalRead(SENSOR_RESERVATORIO);
+
+    bool pocoVazio = (leituraPoco == HIGH);
+    bool reservatorioCheio = (leituraReservatorio == HIGH);
+
+    Serial.println("--------------------");
+    Serial.print("Poço: ");
+    Serial.println(pocoVazio ? "Vazio" : "Com água");
+
+    Serial.print("Reservatório: ");
+    Serial.println(reservatorioCheio ? "Cheio" : "Vazio");
+
+    // -------------------------------
+    // CASO 1: RESERVATÓRIO CHEIO
+    // -------------------------------
+    if (reservatorioCheio) {
+
+      if (estadoBomba) {
+        pulsoDesliga();
+        estadoBomba = false;
+        Serial.println("Bomba desligada (reservatório cheio)");
+      }
+
+      contadorErros = 0;
+      tempoErro = 0;
+
+    } 
+    // -------------------------------
+    // CASO 2: RESERVATÓRIO VAZIO
+    // -------------------------------
+    else {
+
+      if (!estadoBomba) {
+        pulsoLiga();
+        estadoBomba = true;
+        tempoTesteReservatorio = tempoAtual;
+        Serial.println("Bomba ligada");
+      }
+
+      // -------------------------------
+      // VERIFICA TEMPO DE ENCHIMENTO
+      // -------------------------------
+      if (estadoBomba && (tempoAtual - tempoTesteReservatorio >= tempoEsperaReservatorio)) {
+
+        if (pocoVazio) {
+
+          pulsoDesliga();
+          estadoBomba = false;
+
+          contadorErros++;
+          tempoErro = tempoAtual;
+
+          Serial.print("ERRO: Poço vazio. Erros: ");
+          Serial.println(contadorErros);
+
+        } else {
+          tempoTesteReservatorio = tempoAtual;
+          Serial.println("Aguardando enchimento...");
+        }
+      }
+    }
+
+    Serial.print("Estado lógico: ");
+    Serial.println(estadoBomba ? "Ligada" : "Desligada");
+  }
+}
