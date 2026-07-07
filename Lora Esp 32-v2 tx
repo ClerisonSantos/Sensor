@@ -1,0 +1,512 @@
+/*
+=====================================================
+ ESP32 Heltec WiFi LoRa 32 V2
+
+ PROJETO:
+ Controle automático de bomba de poço
+
+ EQUIPAMENTO:
+ EMISSOR (lado do poço)
+
+ Comunicação:
+ EMISSOR  --->  RECEPTOR
+
+ Comandos enviados:
+ LIGA
+ DESLIGA
+
+ Sensores:
+ Chaves secas sem alimentação
+
+=====================================================
+*/
+
+
+#include "heltec.h"
+
+
+// ==================================================
+// CONFIGURAÇÃO LORA
+// ==================================================
+
+#define FREQUENCIA_LORA 915E6
+
+#define SYNC_WORD_LORA 0xF3
+
+
+
+// ==================================================
+// IDENTIFICAÇÃO DA REDE
+// ==================================================
+
+const char REDE[] = "CASA01";
+
+const char ID_EMISSOR[] = "EMISSOR01";
+
+const char ID_RECEPTOR[] = "RECEPTOR01";
+
+
+
+// ==================================================
+// PINOS DOS SENSORES
+// ==================================================
+
+#define PIN_SENSOR_RESERVATORIO 34
+
+#define PIN_SENSOR_POCO 35
+
+
+
+// ==================================================
+// ESTADOS DOS SENSORES
+// CHAVE SECA
+//
+// LOW  = fechado
+// HIGH = aberto
+// ==================================================
+
+
+#define RESERVATORIO_CHEIO LOW
+
+#define RESERVATORIO_VAZIO HIGH
+
+
+#define POCO_COM_AGUA LOW
+
+#define POCO_SEM_AGUA HIGH
+
+
+
+// ==================================================
+// TEMPOS DO SISTEMA
+// ==================================================
+
+
+// Tempo para água chegar após ligar bomba
+
+#define TEMPO_VERIFICA_AGUA 60000
+
+
+
+// Tempo entre tentativas
+
+#define TEMPO_NOVA_TENTATIVA 60000
+
+
+
+// ==================================================
+// PROTEÇÃO
+// ==================================================
+
+#define LIMITE_TENTATIVAS 5
+
+
+
+// ==================================================
+// VARIÁVEIS DE CONTROLE
+// ==================================================
+
+unsigned long sequenciaMensagem = 0;
+
+
+unsigned long tempoControle = 0;
+
+
+int contadorTentativas = 0;
+
+
+
+// ==================================================
+// ESTADOS DO EMISSOR
+// ==================================================
+
+enum EstadoSistema
+{
+
+  INICIO,
+
+  AGUARDANDO_AGUA,
+
+  BOMBEANDO,
+
+  ESPERA_TENTATIVA,
+
+  BLOQUEADO
+
+};
+
+
+EstadoSistema estado = INICIO;
+
+
+
+// ==================================================
+// ENVIO LORA
+// ==================================================
+
+void enviarComando(String comando)
+{
+
+
+  sequenciaMensagem++;
+
+
+  String mensagem;
+
+
+  mensagem =
+  String(REDE)
+  + "|"
+  + String(ID_EMISSOR)
+  + "|"
+  + String(ID_RECEPTOR)
+  + "|"
+  + String(sequenciaMensagem)
+  + "|"
+  + comando;
+
+
+
+  LoRa.beginPacket();
+
+  LoRa.print(mensagem);
+
+  LoRa.endPacket();
+
+
+
+  Serial.println("----------------");
+
+  Serial.println("ENVIADO:");
+
+  Serial.println(mensagem);
+
+  Serial.println("----------------");
+
+
+}
+
+
+
+// ==================================================
+// SETUP
+// ==================================================
+
+void setup()
+{
+
+
+  Serial.begin(115200);
+
+
+
+  pinMode(
+    PIN_SENSOR_RESERVATORIO,
+    INPUT_PULLUP
+  );
+
+
+  pinMode(
+    PIN_SENSOR_POCO,
+    INPUT_PULLUP
+  );
+
+
+
+  Heltec.begin(
+    true,
+    true,
+    true,
+    true,
+    FREQUENCIA_LORA
+  );
+
+
+
+  LoRa.setSyncWord(
+    SYNC_WORD_LORA
+  );
+
+
+
+  Serial.println();
+
+  Serial.println("===================");
+
+  Serial.println("EMISSOR ONLINE");
+
+  Serial.println("===================");
+
+
+
+  enviarComando(
+    "DESLIGA"
+  );
+
+
+}
+
+
+
+// ==================================================
+// LOOP PRINCIPAL
+// ==================================================
+
+void loop()
+{
+
+
+  unsigned long agora = millis();
+
+
+
+  int reservatorio =
+  digitalRead(
+    PIN_SENSOR_RESERVATORIO
+  );
+
+
+  int poco =
+  digitalRead(
+    PIN_SENSOR_POCO
+  );
+
+
+
+
+
+  // =================================================
+  // BLOQUEADO
+  // =================================================
+
+  if(estado == BLOQUEADO)
+  {
+
+    return;
+
+  }
+
+
+
+
+  // =================================================
+  // INICIO / VERIFICA RESERVATORIO
+  // =================================================
+
+  if(
+    estado == INICIO
+  )
+  {
+
+
+    // Reservatório cheio
+
+    if(
+      reservatorio == RESERVATORIO_CHEIO
+    )
+    {
+
+
+      enviarComando(
+        "DESLIGA"
+      );
+
+
+      contadorTentativas = 0;
+
+
+      delay(5000);
+
+
+    }
+
+
+
+    // Reservatório vazio
+
+    else
+    {
+
+
+      enviarComando(
+        "LIGA"
+      );
+
+
+      tempoControle = agora;
+
+
+      estado = AGUARDANDO_AGUA;
+
+
+
+    }
+
+
+  }
+
+
+
+
+
+  // =================================================
+  // AGUARDA 60 SEGUNDOS
+  // =================================================
+
+  else if(
+    estado == AGUARDANDO_AGUA
+  )
+  {
+
+
+
+    if(
+      agora - tempoControle >= TEMPO_VERIFICA_AGUA
+    )
+    {
+
+
+      if(
+        poco == POCO_COM_AGUA
+      )
+      {
+
+
+        contadorTentativas = 0;
+
+
+        estado = BOMBEANDO;
+
+
+      }
+
+      else
+      {
+
+
+        enviarComando(
+          "DESLIGA"
+        );
+
+
+        tempoControle = agora;
+
+
+        estado = ESPERA_TENTATIVA;
+
+
+      }
+
+
+    }
+
+
+  }
+
+
+
+
+
+  // =================================================
+  // BOMBEANDO
+  // =================================================
+
+  else if(
+    estado == BOMBEANDO
+  )
+  {
+
+
+
+    if(
+      reservatorio == RESERVATORIO_CHEIO
+    )
+    {
+
+
+      enviarComando(
+        "DESLIGA"
+      );
+
+
+      contadorTentativas = 0;
+
+
+      estado = INICIO;
+
+
+    }
+
+
+  }
+
+
+
+
+
+  // =================================================
+  // NOVA TENTATIVA
+  // =================================================
+
+  else if(
+    estado == ESPERA_TENTATIVA
+  )
+  {
+
+
+
+    if(
+      agora - tempoControle >= TEMPO_NOVA_TENTATIVA
+    )
+    {
+
+
+      contadorTentativas++;
+
+
+
+      Serial.print(
+        "Tentativa: "
+      );
+
+
+      Serial.println(
+        contadorTentativas
+      );
+
+
+
+      if(
+        contadorTentativas >= LIMITE_TENTATIVAS
+      )
+      {
+
+
+        Serial.println(
+          "SISTEMA BLOQUEADO"
+        );
+
+
+        estado = BLOQUEADO;
+
+
+      }
+
+      else
+      {
+
+
+        estado = INICIO;
+
+
+      }
+
+
+    }
+
+
+  }
+
+
+
+}
